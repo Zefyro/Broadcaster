@@ -12,7 +12,7 @@ internal static class Broadcaster
     internal static readonly IPAddress BroadcastAddress = IPAddress.Broadcast;
     internal static readonly IPAddress Address = Dns.GetHostEntry(Dns.GetHostName()).AddressList.First(ip => ip.AddressFamily == AddressFamily.InterNetwork);
 
-    internal static UInt64? PingTimestamp;
+    internal static UInt64 PingTimestamp;
 
     static void Main(string[] args)
     {
@@ -91,7 +91,7 @@ internal static class Broadcaster
 
                 byte[] header_hash = HashHeader(header, remoteEndPoint.Address).ToBytes();
                 bool validHash = MatchHeader(header.md5hash.ToBytes(), header_hash);
-                Console.WriteLine(validHash ? "Hash Valid" : "Hash Invalid");
+                Console.Write(validHash ? "[Valid] " : "[Invalid] ");
 
                 switch ((PacketOpcode)BinaryPrimitives.ReverseEndianness(header.opcode))
                 {
@@ -126,7 +126,11 @@ internal static class Broadcaster
                         client.Send(HeaderToBytes(CreateHeader(PacketOpcode.CHANNEL_PONG, 0)), 32, new IPEndPoint(BroadcastAddress, Port));
                         break;
                     case PacketOpcode.CHANNEL_PONG:
-                        Console.WriteLine($"{remoteEndPoint} >> PONG ({header.timestamp - PingTimestamp}ms)");
+                        Int64 pong = (Int64)BinaryPrimitives.ReverseEndianness(header.timestamp);
+                        Int64 ping = (Int64)BinaryPrimitives.ReverseEndianness(PingTimestamp);
+                        Int64 current = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+                        Console.WriteLine($"{remoteEndPoint} >> PONG TO {ping - pong}ms FROM {current - pong}ms");
                         break;
                     case PacketOpcode.CHANNEL_PUBLIC_KEY:
                         break;
