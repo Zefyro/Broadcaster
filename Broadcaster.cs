@@ -94,7 +94,7 @@ internal static class Broadcaster
                             msg = Encoding.ASCII.GetString(message.msg!);
                         }
 
-                        byte[] header_hash = HashHeader(header, remoteEndPoint.Address).ToBigEndian().ToBytes();
+                        byte[] header_hash = HashHeader(header, remoteEndPoint.Address).ToBytes();
                         bool validHash = MatchHeader(header.md5hash.ToBytes(), header_hash);
 
                         Console.WriteLine(validHash ? "Hash Valid" : "Hash Invalid");
