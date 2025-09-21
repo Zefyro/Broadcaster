@@ -123,6 +123,7 @@ internal static class Broadcaster
                         break;
                     case PacketOpcode.CHANNEL_PING:
                         Console.WriteLine($"{remoteEndPoint} >> PING");
+                        PingTimestamp = header.timestamp;
                         client.Send(HeaderToBytes(CreateHeader(PacketOpcode.CHANNEL_PONG, 0)), 32, new IPEndPoint(BroadcastAddress, Port));
                         break;
                     case PacketOpcode.CHANNEL_PONG:
@@ -146,13 +147,10 @@ internal static class Broadcaster
     }
     internal static void ClientCommands(string command, UdpClient client)
     {
-        PacketHeader header;
         switch (command)
         {
             case "/ping":
-                header = CreateHeader(PacketOpcode.CHANNEL_PING, 0);
-                PingTimestamp = header.timestamp;
-                client.Send(HeaderToBytes(header), 32, new IPEndPoint(BroadcastAddress, Port));
+                client.Send(HeaderToBytes(CreateHeader(PacketOpcode.CHANNEL_PING, 0)), 32, new IPEndPoint(BroadcastAddress, Port));
                 break;
             default:
                 Console.WriteLine("!! Invalid client command !!");
