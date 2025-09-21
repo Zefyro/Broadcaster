@@ -8,6 +8,7 @@ internal enum PacketOpcode : UInt16
     CHANNEL_EXIT = 0xC002,
     CHANNEL_PUBLIC_KEY = 0xC010,
     CHANNEL_PING = 0xC020,
+    CHANNEL_PONG = 0xC021,
 }
 
 internal struct PacketHeader
@@ -19,17 +20,7 @@ internal struct PacketHeader
     internal UInt128 md5hash;
 }
 
-internal struct MessagePacket
+internal struct DataPacket
 {
-    internal Byte[]? msg;
-}
-
-internal struct PublicKeyPacket
-{
-    internal Byte[]? public_key;
-}
-
-internal struct AcknowledgePacket
-{
-    internal UInt128 md5hash;
+    internal Byte[]? data;
 }
