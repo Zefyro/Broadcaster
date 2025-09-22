@@ -18,18 +18,18 @@ internal static class Broadcaster
     {
         Console.WriteLine($"{Environment.UserName}@{Dns.GetHostName()} : {Address}");
 
-        Thread listener = new(Listener);
+        using UdpClient client = new();
+
+        Thread listener = new(() => Listener(client));
         listener.Start();
-        Thread sender = new(Sender);
+        Thread sender = new(() => Sender(client));
         sender.Start();
         sender.Join();
     }
-    internal static void Sender()
+    internal static void Sender(UdpClient client)
     {
-        using UdpClient client = new();
-
         PacketHeader header;
-        header = CreateHeader(PacketOpcode.CHANNEL_JOIN, 0);
+        header = CreateHeader(PacketOpcode.CHANNEL_JOIN, Address, 0);
 
         client.Send(HeaderToBytes(header), 32, new IPEndPoint(BroadcastAddress, Port));
         Console.WriteLine($"Ready to send UDP broadcast messages on port {Port}");
@@ -42,12 +42,29 @@ internal static class Broadcaster
 
             if (line.StartsWith('/'))
             {
-                ClientCommands(line, client);
+                switch (line)
+                {
+                    case "/ping":
+                        client.Send(HeaderToBytes(CreateHeader(PacketOpcode.CHANNEL_PING, Address, 0)), 32, new IPEndPoint(BroadcastAddress, Port));
+                        break;
+                    case "/quit":
+                    case "/exit":
+                    case "/stop":
+                        client.Send(HeaderToBytes(CreateHeader(PacketOpcode.CHANNEL_EXIT, Address, 0)), 32, new IPEndPoint(BroadcastAddress, Port));
+                        return;
+                    case "/clear":
+                        Console.Clear();
+                        Console.WriteLine($"{Environment.UserName}@{Dns.GetHostName()} : {Address}");
+                        break;
+                    default:
+                        Console.WriteLine("!! Invalid client command !!");
+                        break;
+                }
                 continue;
             }
 
             byte[] text = Encoding.ASCII.GetBytes(line);
-            header = CreateHeader(PacketOpcode.SEND_MSG, text.Length);
+            header = CreateHeader(PacketOpcode.SEND_MSG, Address, text.Length);
 
             DataPacket message;
             message.data = text;
@@ -61,10 +78,9 @@ internal static class Broadcaster
             Console.WriteLine($">>> {line}");
         }
     }
-    internal static void Listener()
+    internal static void Listener(UdpClient client)
     {
         Console.WriteLine("Starting UDP broadcast listener...");
-        using UdpClient client = new();
         client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
 
         IPEndPoint localEndPoint = new(IPAddress.Any, Port);
@@ -77,9 +93,6 @@ internal static class Broadcaster
         {
             while (true)
             {
-                //if (remoteEndPoint.Address.ToString() == Address.ToString())
-                //    continue;
-
                 byte[] receivedBytes = client.Receive(ref remoteEndPoint);
 
                 MemoryStream stream = new(receivedBytes);
@@ -114,24 +127,24 @@ internal static class Broadcaster
 
                         DataPacket public_key = ReadDataPacket(reader, header.size);
 
-
-                        
-                        client.Send(HeaderToBytes(CreateHeader(PacketOpcode.ACKNOWLEDGE, 0)), 32, new IPEndPoint(BroadcastAddress, Port));
+                        client.Send(HeaderToBytes(CreateHeader(PacketOpcode.ACKNOWLEDGE, Address, 0)), 32, new IPEndPoint(BroadcastAddress, Port));
                         break;
                     case PacketOpcode.CHANNEL_EXIT:
                         Console.WriteLine($"{remoteEndPoint} >> EXIT");
+                        if ((remoteEndPoint.Address == Address) && (remoteEndPoint.Port == Port))
+                            return;
                         break;
                     case PacketOpcode.CHANNEL_PING:
                         Console.WriteLine($"{remoteEndPoint} >> PING");
                         PingTimestamp = header.timestamp;
-                        client.Send(HeaderToBytes(CreateHeader(PacketOpcode.CHANNEL_PONG, 0)), 32, new IPEndPoint(BroadcastAddress, Port));
+                        client.Send(HeaderToBytes(CreateHeader(PacketOpcode.CHANNEL_PONG, Address, 0)), 32, new IPEndPoint(BroadcastAddress, Port));
                         break;
                     case PacketOpcode.CHANNEL_PONG:
                         Int64 pong = (Int64)BinaryPrimitives.ReverseEndianness(header.timestamp);
                         Int64 ping = (Int64)BinaryPrimitives.ReverseEndianness(PingTimestamp);
                         Int64 current = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-                        Console.WriteLine($"{remoteEndPoint} >> PONG TO {ping - pong}ms FROM {current - pong}ms");
+                        Console.WriteLine($"{remoteEndPoint} >> PONG TO {ping - pong}ms FROM {current - pong}ms TOTAL {current - ping}ms");
                         break;
                     case PacketOpcode.CHANNEL_PUBLIC_KEY:
                         break;
@@ -145,19 +158,7 @@ internal static class Broadcaster
             Console.WriteLine(e.ToString());
         }
     }
-    internal static void ClientCommands(string command, UdpClient client)
-    {
-        switch (command)
-        {
-            case "/ping":
-                client.Send(HeaderToBytes(CreateHeader(PacketOpcode.CHANNEL_PING, 0)), 32, new IPEndPoint(BroadcastAddress, Port));
-                break;
-            default:
-                Console.WriteLine("!! Invalid client command !!");
-                break;
-        }
-    }
-    internal static PacketHeader CreateHeader(PacketOpcode opcode, int extra_size)
+    internal static PacketHeader CreateHeader(PacketOpcode opcode, IPAddress address, int extra_size)
     {
         PacketHeader header;
         UInt64 timestamp = ((UInt64)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()).ToBigEndian();
@@ -166,7 +167,7 @@ internal static class Broadcaster
         header.opcode = ((UInt16)opcode).ToBigEndian();
         header.timestamp = timestamp;
         header.md5hash = 0;
-        header.md5hash = HashHeader(header, Address);
+        header.md5hash = HashHeader(header, address);
         return header;
     }
     internal static UInt128 HashHeader(PacketHeader header, IPAddress address)
@@ -174,9 +175,9 @@ internal static class Broadcaster
         List<byte> bytes = [];
         bytes.AddRange(address.GetAddressBytes());
         bytes.AddRange(header.magic);
-        bytes.AddRange(header.size.ToBigEndian().ToBytes());
-        bytes.AddRange(header.opcode.ToBigEndian().ToBytes());
-        bytes.AddRange(header.timestamp.ToBigEndian().ToBytes());
+        bytes.AddRange(header.size.ToBytes());
+        bytes.AddRange(header.opcode.ToBytes());
+        bytes.AddRange(header.timestamp.ToBytes());
         return BitConverter.ToUInt128(MD5.HashData([.. bytes]));
     }
     internal static bool MatchHeader(byte[] hash1, byte[] hash2)
