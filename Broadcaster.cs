@@ -1,18 +1,19 @@
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
-using System.Security.Cryptography;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Broadcast;
 
-internal static class Broadcaster
+internal static partial class Broadcaster
 {
     internal static readonly int Port = 12345;
     internal static readonly IPAddress BroadcastAddress = IPAddress.Broadcast;
     internal static readonly IPAddress Address = Dns.GetHostEntry(Dns.GetHostName()).AddressList.First(ip => ip.AddressFamily == AddressFamily.InterNetwork);
 
-    internal static UInt64 PingTimestamp;
+    internal static Dictionary<IPAddress, Guid> KnownClients = [];
+    internal static Dictionary<Guid, string> KnownAliases = [];
 
     static void Main(string[] args)
     {
@@ -28,10 +29,15 @@ internal static class Broadcaster
     }
     internal static void Sender(UdpClient client)
     {
+        string? senderAlias = $"{Environment.UserName}@{Dns.GetHostName()}";
         PacketHeader header;
-        header = CreateHeader(PacketOpcode.CHANNEL_JOIN, Address, 0);
+        header = CreateHeader(PacketOpcode.CHANNEL_JOIN, Address, senderAlias.Length);
 
-        client.Send(HeaderToBytes(header), 32, new IPEndPoint(BroadcastAddress, Port));
+        List<byte> joinPacket = [];
+        joinPacket.AddRange(HeaderToBytes(header));
+        joinPacket.AddRange(Encoding.ASCII.GetBytes(senderAlias));
+
+        client.Send([.. joinPacket], joinPacket.Count, new IPEndPoint(BroadcastAddress, Port));
         Console.WriteLine($"Ready to send UDP broadcast messages on port {Port}");
 
         while (true)
@@ -102,6 +108,14 @@ internal static class Broadcaster
                 if (Encoding.UTF8.GetString(header.magic) != "CAST")
                     continue;
 
+                if (!KnownClients.TryGetValue(remoteEndPoint.Address, out Guid clientId))
+                {
+                    clientId = Guid.NewGuid();
+                    KnownClients.Add(remoteEndPoint.Address, clientId);
+                }
+
+                bool hasAlias = KnownAliases.TryGetValue(KnownClients[remoteEndPoint.Address], out string? alias);
+
                 byte[] header_hash = HashHeader(header, remoteEndPoint.Address).ToBytes();
                 bool validHash = MatchHeader(header.md5hash.ToBytes(), header_hash);
                 Console.Write(validHash ? "[Valid] " : "[Invalid] ");
@@ -117,25 +131,37 @@ internal static class Broadcaster
                             text = Encoding.UTF8.GetString(message.data!);
                         }
 
-                        Console.WriteLine($"Received broadcast from {remoteEndPoint}: {Convert.ToHexString(HeaderToBytes(header))}\n<<< {text}");
+                        Console.WriteLine($"Received broadcast from {(hasAlias ? alias : clientId)}: {Convert.ToHexString(HeaderToBytes(header))}\n<<< {text}");
                         break;
                     case PacketOpcode.ACKNOWLEDGE:
-                        Console.WriteLine($"{remoteEndPoint} >> ACK");
+                        Console.WriteLine($"{(hasAlias ? alias : clientId)} >> ACK");
                         break;
                     case PacketOpcode.CHANNEL_JOIN:
-                        Console.WriteLine($"{remoteEndPoint} >> JOIN");
+                        Console.WriteLine($"{remoteEndPoint} >> JOIN\n>> Added as {clientId}");
 
-                        DataPacket public_key = ReadDataPacket(reader, header.size);
+                        DataPacket hostName = ReadDataPacket(reader, header.size);
+                        if (hostName.data!.Length > 0)
+                        {
+                            string t = string.Empty;
+                            t = Encoding.UTF8.GetString(hostName.data);
+
+                            KnownAliases.Add(clientId, t);
+
+                            Console.WriteLine($"Added alias for {KnownClients[remoteEndPoint.Address]}: {t}");
+                            
+                        }
+
+                        //DataPacket public_key = ReadDataPacket(reader, header.size);
 
                         client.Send(HeaderToBytes(CreateHeader(PacketOpcode.ACKNOWLEDGE, Address, 0)), 32, new IPEndPoint(BroadcastAddress, Port));
                         break;
                     case PacketOpcode.CHANNEL_EXIT:
-                        Console.WriteLine($"{remoteEndPoint} >> EXIT");
+                        Console.WriteLine($"{(hasAlias ? alias : clientId)} >> EXIT");
                         if ((remoteEndPoint.Address == Address) && (remoteEndPoint.Port == Port))
                             return;
                         break;
                     case PacketOpcode.CHANNEL_PING:
-                        Console.WriteLine($"{remoteEndPoint} >> PING");
+                        Console.WriteLine($"{(hasAlias ? alias : clientId)} >> PING");
                         PingTimestamp = header.timestamp;
                         client.Send(HeaderToBytes(CreateHeader(PacketOpcode.CHANNEL_PONG, Address, 0)), 32, new IPEndPoint(BroadcastAddress, Port));
                         break;
@@ -144,7 +170,7 @@ internal static class Broadcaster
                         Int64 ping = (Int64)BinaryPrimitives.ReverseEndianness(PingTimestamp);
                         Int64 current = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-                        Console.WriteLine($"{remoteEndPoint} >> PONG TO {ping - pong}ms FROM {current - pong}ms TOTAL {current - ping}ms");
+                        Console.WriteLine($"{(hasAlias ? alias : clientId)} >> PONG TO {ping - pong}ms FROM {current - pong}ms TOTAL {current - ping}ms");
                         break;
                     case PacketOpcode.CHANNEL_PUBLIC_KEY:
                         break;
@@ -158,63 +184,4 @@ internal static class Broadcaster
             Console.WriteLine(e.ToString());
         }
     }
-    internal static PacketHeader CreateHeader(PacketOpcode opcode, IPAddress address, int extra_size)
-    {
-        PacketHeader header;
-        UInt64 timestamp = ((UInt64)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()).ToBigEndian();
-        header.magic = [0x43, 0x41, 0x53, 0x54];
-        header.size = ((UInt16)(28 + extra_size)).ToBigEndian();
-        header.opcode = ((UInt16)opcode).ToBigEndian();
-        header.timestamp = timestamp;
-        header.md5hash = 0;
-        header.md5hash = HashHeader(header, address);
-        return header;
-    }
-    internal static UInt128 HashHeader(PacketHeader header, IPAddress address)
-    {
-        List<byte> bytes = [];
-        bytes.AddRange(address.GetAddressBytes());
-        bytes.AddRange(header.magic);
-        bytes.AddRange(header.size.ToBytes());
-        bytes.AddRange(header.opcode.ToBytes());
-        bytes.AddRange(header.timestamp.ToBytes());
-        return BitConverter.ToUInt128(MD5.HashData([.. bytes]));
-    }
-    internal static bool MatchHeader(byte[] hash1, byte[] hash2)
-    {
-        for (int i = 0; i < hash1.Length; i++)
-        {
-            if (hash1[i] != hash2[i])
-                return false;
-        }
-        return true;
-    }
-    internal static PacketHeader ReadPacketHeader(BinaryReader reader) => new()
-    {
-        magic = reader.ReadBytes(4),
-        size = reader.ReadUInt16(),
-        opcode = reader.ReadUInt16(),
-        timestamp = reader.ReadUInt64(),
-        md5hash = BitConverter.ToUInt128(reader.ReadBytes(16)),
-    };
-    internal static byte[] HeaderToBytes(PacketHeader header)
-    {
-        List<byte> bytes = [];
-        bytes.AddRange(header.magic);
-        bytes.AddRange(header.size.ToBytes());
-        bytes.AddRange(header.opcode.ToBytes());
-        bytes.AddRange(header.timestamp.ToBytes());
-        bytes.AddRange(header.md5hash.ToBytes());
-        return [.. bytes];
-    }
-    internal static DataPacket ReadDataPacket(BinaryReader reader, int size) => new()
-    {
-        data = reader.ReadBytes(size - 28),
-    };
-    internal static byte[] ToBytes(this UInt16 value) => BitConverter.GetBytes(value);
-    internal static byte[] ToBytes(this UInt64 value) => BitConverter.GetBytes(value);
-    internal static byte[] ToBytes(this UInt128 value) => BitConverter.GetBytes(value);
-    internal static UInt16 ToBigEndian(this UInt16 value) => BitConverter.IsLittleEndian ? BinaryPrimitives.ReverseEndianness(value) : value;
-    internal static UInt64 ToBigEndian(this UInt64 value) => BitConverter.IsLittleEndian ? BinaryPrimitives.ReverseEndianness(value) : value;
-    internal static UInt128 ToBigEndian(this UInt128 value) => BitConverter.IsLittleEndian ? BinaryPrimitives.ReverseEndianness(value) : value;
 }
