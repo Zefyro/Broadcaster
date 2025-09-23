@@ -5,7 +5,7 @@ using System.Security.Cryptography;
 namespace Broadcast;
 internal static partial class Broadcaster
 {
-    internal static UInt64 PingTimestamp;
+    internal static Int64 PingTimestamp;
     internal static PacketHeader CreateHeader(PacketOpcode opcode, IPAddress address, int extra_size)
     {
         PacketHeader header;
